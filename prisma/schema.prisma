@@ -1,0 +1,207 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// 0. User & Role Management
+model User {
+  id              String   @id @default(uuid())
+  email           String   @unique
+  name            String
+  role            String   // ROLE_SUPERADMIN, ROLE_MANAGER, ROLE_STAFF, ROLE_CLIENT
+  department      String
+  position        String
+  isResigned      Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  // Relations
+  assignmentsGiven    EvaluationAssignment[] @relation("RaterAssignments")
+  assignmentsReceived EvaluationAssignment[] @relation("EmployeeAssignments")
+  cycleResults        EmployeeCycleResult[]
+  tasksAssigned       TaskEngine[]           @relation("TasksAssignedTo")
+  tasksCreated        TaskEngine[]           @relation("TasksCreatedBy")
+  sopsCreated         MasterSop[]            @relation("SopsCreatedBy")
+  actionTickets       ActionTicket[]         @relation("TicketAssignee")
+  mentoredTickets     ActionTicket[]         @relation("TicketMentor")
+}
+
+// 1. Master Aspek Penilaian
+model MasterAspect {
+  aspectCode       String   @id // ASP_KS (30%), ASP_KR (25%), ASP_SK (25%), ASP_KB (20%)
+  aspectName       String
+  globalWeightPct  Float    // KS: 30, KR: 25, SK: 25, KB: 20
+  createdAt        DateTime @default(now())
+
+  barsQuestions    MasterBarsQuestion[]
+}
+
+// 2. Master Versi Kuisioner (Dukungan Import Wizard)
+model QuestionnaireVersion {
+  id              String   @id @default(uuid())
+  versionTag      String   @unique // v1.0, v2.0-2027-Q1
+  description     String?
+  uploadedBy      String
+  status          String   @default("DRAFT") // DRAFT, PUBLISHED, ARCHIVED
+  totalQuestions  Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  barsQuestions    MasterBarsQuestion[]
+  evaluationCycles EvaluationCycle[]
+}
+
+// 3. Master Skenario BARS (Terikat ke Version Tag)
+model MasterBarsQuestion {
+  id               String               @id @default(uuid())
+  versionId        String
+  aspectCode       String
+  targetRole       String               // MGR, PEER, CROSS, CLI
+  questionCode     String               // e.g. KS_PEER_01
+  scenarioQuestion String
+  level1Desc       String               // Skor 20
+  level2Desc       String               // Skor 40
+  level3Desc       String               // Skor 60
+  level4Desc       String               // Skor 80
+  level5Desc       String               // Skor 100
+  createdAt        DateTime             @default(now())
+
+  version          QuestionnaireVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+  aspect           MasterAspect         @relation(fields: [aspectCode], references: [aspectCode], onDelete: Restrict)
+  answers          EvaluationAnswer[]
+
+  @@unique([versionId, questionCode])
+}
+
+// 4. Siklus Evaluasi
+model EvaluationCycle {
+  id          String                 @id @default(uuid())
+  versionId   String
+  cycleName   String
+  startDate   DateTime
+  endDate     DateTime
+  status      String                 @default("ACTIVE") // DRAFT, ACTIVE, CALCULATING, CLOSED
+  createdAt   DateTime               @default(now())
+
+  version     QuestionnaireVersion   @relation(fields: [versionId], references: [id], onDelete: Restrict)
+  assignments EvaluationAssignment[]
+  results     EmployeeCycleResult[]
+  tickets     ActionTicket[]
+}
+
+// 5. Penugasan Penilai (360 Assignment)
+model EvaluationAssignment {
+  id                String             @id @default(uuid())
+  cycleId           String
+  employeeId        String
+  raterId           String
+  relationship      String             // MGR, PEER, CROSS, CLI
+  isSubmitted       Boolean            @default(false)
+  isFlaggedAnomaly  Boolean            @default(false)
+  anomalyReason     String?
+  clientToken       String?            @unique // Untuk akses eksternal one-time link
+  submittedAt       DateTime?
+
+  cycle             EvaluationCycle    @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  employee          User               @relation("EmployeeAssignments", fields: [employeeId], references: [id])
+  rater             User               @relation("RaterAssignments", fields: [raterId], references: [id])
+  answers           EvaluationAnswer[]
+}
+
+// 6. Jawaban Evaluasi BARS
+model EvaluationAnswer {
+  id              String               @id @default(uuid())
+  assignmentId    String
+  questionId      String
+  selectedLevel   Int                  // 1 - 5
+  evidenceText    String?              // Mandatory for Level 1 and Level 5 (>= 50 chars)
+  calculatedScore Float                // selectedLevel * 20
+
+  assignment      EvaluationAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  question        MasterBarsQuestion   @relation(fields: [questionId], references: [id], onDelete: Restrict)
+}
+
+// 7. Hasil Agregasi Siklus
+model EmployeeCycleResult {
+  id                  String          @id @default(uuid())
+  cycleId             String
+  employeeId          String
+  scoreCooperation    Float           // ASP_KS
+  scoreCapability     Float           // ASP_KB
+  scoreCharacter      Float           // ASP_KR
+  scoreAttitude       Float           // ASP_SK
+  deltaIncident       Float           @default(0.0) // -15.0 to +5.0
+  finalCompositeScore Float
+  finalClassification String          // TIPE_A, TIPE_B, TIPE_C_SKILL, TIPE_C_ATTITUDE
+  actionTriggers      String?         // JSON string: triggered actions
+  calculatedAt        DateTime        @default(now())
+
+  cycle               EvaluationCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  employee            User            @relation(fields: [employeeId], references: [id])
+
+  @@unique([cycleId, employeeId])
+}
+
+// 8. Master Dokumen SOP Operasional
+model MasterSop {
+  id             String       @id @default(uuid())
+  sopCode        String       @unique
+  title          String
+  description    String?
+  checklistSteps String       // JSON serialized: [{ step: 1, title: "...", required: true }]
+  createdBy      String
+  updatedAt      DateTime     @default(now())
+
+  creator        User         @relation("SopsCreatedBy", fields: [createdBy], references: [id])
+  tasks          TaskEngine[]
+}
+
+// 9. Mesin Tugas Operasional (Turnover-Proof)
+model TaskEngine {
+  id                String       @id @default(uuid())
+  sopId             String
+  assignedTo        String
+  assignedBy        String
+  taskTitle         String
+  checklistProgress String       // JSON serialized: [{ step: 1, completed: true, completedAt: "..." }]
+  status            String       @default("TODO") // TODO, IN_PROGRESS, REVIEW, COMPLETED
+  dueDate           DateTime
+  completedAt       DateTime?
+  createdAt         DateTime     @default(now())
+
+  sop               MasterSop    @relation(fields: [sopId], references: [id], onDelete: Restrict)
+  assignee          User         @relation("TasksAssignedTo", fields: [assignedTo], references: [id])
+  assigner          User         @relation("TasksCreatedBy", fields: [assignedBy], references: [id])
+}
+
+// 10. Audit Log & Handover Tracking
+model HandoverLog {
+  id               String   @id @default(uuid())
+  resignedUserId   String
+  successorUserId  String
+  tasksTransferred Int
+  sopsTransferred  Int
+  executionMs      Int
+  status           String   @default("SUCCESS")
+  timestamp        DateTime @default(now())
+}
+
+// 11. Action Tickets (PIP Teknis & Konseling 1-on-1)
+model ActionTicket {
+  id          String           @id @default(uuid())
+  employeeId  String
+  cycleId     String
+  ticketType  String           // PIP_30_DAYS, COUNSELING_1ON1, APPROVAL_AUTHORITY
+  status      String           @default("OPEN") // OPEN, IN_PROGRESS, RESOLVED
+  title       String
+  description String
+  mentorId    String?
+  dueDate     DateTime
+  createdAt   DateTime         @default(now())
+
+  employee    User             @relation("TicketAssignee", fields: [employeeId], references: [id])
+  cycle       EvaluationCycle  @relation(fields: [cycleId], references: [id])
+  mentor      User?            @relation("TicketMentor", fields: [mentorId], references: [id])
+}
